@@ -1,0 +1,10 @@
+{
+  "location": { "lat": 33.6405, "lon": -117.8443, "label": "Irvine, CA" },
+  "units": "fahrenheit",
+  "refresh_minutes": 15,
+  "news_feeds": ["http://feeds.bbci.co.uk/news/rss.xml"],
+  "topics": [
+    { "name": "BTC", "kind": "coingecko", "ids": "bitcoin", "label": "BTC" },
+    { "name": "NBA", "kind": "rss", "url": "https://www.espn.com/espn/rss/nba/news" }
+  ]
+}

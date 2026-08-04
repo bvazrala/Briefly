@@ -1,0 +1,10 @@
+# never commit credentials
+firmware/include/secrets.h
+gateway/secrets.json
+# runtime + build artifacts
+gateway/state/
+firmware/.pio/
+.pio/
+.venv/
+__pycache__/
+*.pyc
