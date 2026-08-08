@@ -150,4 +150,4 @@ This is a two person project. I am the team lead and wrote all of the software: 
 
 ## License
 
-<!-- TODO: pick one. MIT is the usual default. -->
+Apache 2.0
