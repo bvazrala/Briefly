@@ -1,144 +1,261 @@
-"""Briefing Station dashboard.
+"""Briefly dashboard.
 
-Run alongside service.py:
     streamlit run app.py
 
-The chat understands, deterministically (no AI involved):
-    update                      -> refresh all cards now
-    alarm 7:00 / wake me at 7am -> set the alarm on the device
-    clear alarms / alarms off   -> clear alarms
-Anything else is where Gemma plugs in later.
+Three tabs:
+  Brief     - what the device is showing, refresh/beep/alarm controls, chat
+  Analytics - charts from device events + indoor climate (and cloud aggregates)
+  Settings  - topics, location, Gemma status
+
+The chat router is deliberately layered: the commands you use every day
+("update", alarm phrases) are hard-coded string/regex matches that never touch
+a model, so they cannot fail. Only free-form sentences reach Gemma.
 """
 import json
 import pathlib
 import re
 
-import streamlit as st
+import pandas as pd
 import paho.mqtt.client as mqtt
+import requests
+import streamlit as st
+
+import brain
+import catalog
 
 BASE = pathlib.Path(__file__).resolve().parent
 
 
 def load_json(name, default=None):
-    p = BASE / name
     try:
-        return json.loads(p.read_text())
+        return json.loads((BASE / name).read_text())
     except Exception:
         return default
+
+
+def save_cfg(cfg):
+    (BASE / "config.json").write_text(json.dumps(cfg, indent=2))
 
 
 SEC = load_json("secrets.json")
 if not SEC:
     st.error("Missing gateway/secrets.json - copy secrets.example.json and edit it.")
     st.stop()
-CFG = load_json("config.json", {}) or {}
 
 
 def publish_once(topic, obj):
-    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    c.username_pw_set(SEC["mqtt_user"], SEC["mqtt_pass"])
-    c.connect(SEC["mqtt_host"], int(SEC.get("mqtt_port", 1883)), 30)
-    c.loop_start()
-    info = c.publish(topic, json.dumps(obj), qos=1)
-    info.wait_for_publish(5)
-    c.loop_stop()
-    c.disconnect()
+    try:
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        c.username_pw_set(SEC["mqtt_user"], SEC["mqtt_pass"])
+        c.connect(SEC["mqtt_host"], int(SEC.get("mqtt_port", 1883)), 30)
+        c.loop_start()
+        c.publish(topic, json.dumps(obj), qos=1).wait_for_publish(5)
+        c.loop_stop()
+        c.disconnect()
+        return True
+    except Exception as e:
+        st.error(f"MQTT publish failed: {e}  (is Mosquitto running?)")
+        return False
 
 
 def set_alarm(hh, mm, days):
-    publish_once("station/command",
-                 {"type": "set_alarm", "time": f"{hh:02d}:{mm:02d}", "days": days})
+    return publish_once("station/command",
+                        {"type": "set_alarm", "time": f"{hh:02d}:{mm:02d}", "days": days})
 
 
-# ------------------------------------------------------------------ layout --
-st.set_page_config(page_title="Briefing Station", page_icon="🗞️")
-st.title("Briefing Station")
+def read_events():
+    p = BASE / "state" / "events.log"
+    if not p.exists():
+        return pd.DataFrame()
+    rows = []
+    for line in p.read_text().splitlines():
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    return df.dropna(subset=["ts"])
 
-state = load_json("state/cards.json")
-if state:
-    st.caption(f"Cards last generated {state.get('generated', '?')} "
-               f"(service.py must be running)")
-    cols = st.columns(2)
-    for i, c in enumerate(state.get("cards", [])):
-        with cols[i % 2]:
-            st.markdown(f"**{c.get('title','')}**  \n"
-                        f"`{c.get('line1','')}`  \n"
-                        f"`{c.get('line2','')}`")
-else:
-    st.info("No cards yet. Start `python service.py` in another terminal, "
-            "then press Refresh.")
 
-c1, c2, c3 = st.columns(3)
-if c1.button("Refresh now"):
-    publish_once("gateway/control", {"type": "refresh"})
-    st.success("Refresh requested.")
-if c2.button("Test beep"):
-    publish_once("station/command", {"type": "beep"})
-    st.success("Beep sent.")
-if c3.button("Clear alarms"):
-    publish_once("station/command", {"type": "clear_alarms"})
-    st.success("Alarms cleared.")
+st.set_page_config(page_title="Briefly", page_icon="🗞️", layout="wide")
+st.title("Briefly")
 
-with st.expander("Set an alarm"):
-    t = st.time_input("Time")
-    daynames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    picked = st.multiselect("Days", daynames, default=daynames)
-    if st.button("Set alarm"):
-        set_alarm(t.hour, t.minute, [daynames.index(d) for d in picked])
-        st.success(f"Alarm set for {t.strftime('%H:%M')}.")
+CFG = load_json("config.json", {}) or {}
+tab_brief, tab_analytics, tab_settings = st.tabs(["Brief", "Analytics", "Settings"])
 
-with st.expander("Preferences (topics on the device)"):
-    st.write("Current topics:",
-             [f"{x.get('name')} ({x.get('kind')})" for x in CFG.get("topics", [])] or "none")
-    with st.form("add_rss"):
-        st.write("Add an RSS topic")
-        n = st.text_input("Name", key="rn")
-        u = st.text_input("Feed URL", key="ru")
-        if st.form_submit_button("Add RSS topic") and n and u:
-            CFG.setdefault("topics", []).append({"name": n, "kind": "rss", "url": u})
-            (BASE / "config.json").write_text(json.dumps(CFG, indent=2))
-            publish_once("gateway/control", {"type": "refresh"})
-            st.success(f"Added {n}.")
-    with st.form("add_coin"):
-        st.write("Add a coin (CoinGecko id, e.g. bitcoin, ethereum)")
-        lbl = st.text_input("Label (e.g. BTC)", key="cl")
-        cid = st.text_input("CoinGecko id", key="ci")
-        if st.form_submit_button("Add coin") and lbl and cid:
-            CFG.setdefault("topics", []).append(
-                {"name": lbl, "kind": "coingecko", "ids": cid, "label": lbl})
-            (BASE / "config.json").write_text(json.dumps(CFG, indent=2))
-            publish_once("gateway/control", {"type": "refresh"})
-            st.success(f"Added {lbl}.")
-
-# -------------------------------------------------------------- chat router --
-ALARM_RE = re.compile(
-    r"(?:alarm|wake me(?: up)?)(?:\s*(?:at|for))?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
-    re.IGNORECASE)
-
-chat = st.chat_input("Type 'update', or 'alarm 7:00', or 'wake me at 7am'")
-if chat:
-    txt = chat.strip().lower()
-    if txt == "update":                                   # deterministic keyword
-        publish_once("gateway/control", {"type": "refresh"})
-        st.success("Updating all cards.")
-    elif any(k in txt for k in ("clear alarm", "alarms off", "no alarm")):
-        publish_once("station/command", {"type": "clear_alarms"})
-        st.success("Alarms cleared.")
+# ================================================================== BRIEF ===
+with tab_brief:
+    state = load_json("state/cards.json")
+    if state:
+        st.caption(f"Cards generated {state.get('generated', '?')}")
+        cards = state.get("cards", [])
+        cols = st.columns(min(4, max(1, len(cards))))
+        for i, c in enumerate(cards):
+            with cols[i % len(cols)]:
+                st.markdown(f"**{c.get('title','')}**")
+                st.code(f"{c.get('line1','')}\n{c.get('line2','')}", language=None)
     else:
-        m = ALARM_RE.search(txt)
-        if m:
-            hh = int(m.group(1))
-            mm = int(m.group(2) or 0)
+        st.info("No cards yet. Run `python service.py` in another terminal, then Refresh.")
+
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("Refresh now", use_container_width=True):
+        if publish_once("gateway/control", {"type": "refresh"}):
+            st.success("Refresh requested.")
+    if c2.button("Test beep", use_container_width=True):
+        publish_once("station/command", {"type": "beep"})
+    if c3.button("Clear alarms", use_container_width=True):
+        publish_once("station/command", {"type": "clear_alarms"})
+    if c4.button("Clear answer card", use_container_width=True):
+        publish_once("gateway/control", {"type": "clear_temp"})
+
+    with st.expander("Set an alarm"):
+        t = st.time_input("Time")
+        daynames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        picked = st.multiselect("Days", daynames, default=daynames)
+        if st.button("Set alarm"):
+            if set_alarm(t.hour, t.minute, [daynames.index(d) for d in picked]):
+                st.success(f"Alarm set for {t.strftime('%H:%M')}.")
+
+    st.divider()
+    ALARM_RE = re.compile(
+        r"(?:alarm|wake me(?: up)?)(?:\s*(?:at|for))?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        re.IGNORECASE)
+
+    chat = st.chat_input("Try: update  ·  alarm 7:00  ·  I care about the Lakers and Bitcoin")
+    if chat:
+        txt = chat.strip()
+        low = txt.lower()
+
+        # ---- layer 1: hard-coded commands, no model involved ---------------
+        if low == "update":
+            if publish_once("gateway/control", {"type": "refresh"}):
+                st.success("Updating all cards.")
+        elif any(k in low for k in ("clear alarm", "alarms off", "no alarm")):
+            publish_once("station/command", {"type": "clear_alarms"})
+            st.success("Alarms cleared.")
+        elif ALARM_RE.search(low):
+            m = ALARM_RE.search(low)
+            hh, mm = int(m.group(1)), int(m.group(2) or 0)
             ap = (m.group(3) or "").lower()
             if ap == "pm" and hh < 12:
                 hh += 12
             if ap == "am" and hh == 12:
                 hh = 0
             if 0 <= hh <= 23 and 0 <= mm <= 59:
-                set_alarm(hh, mm, list(range(7)))
-                st.success(f"Alarm set for {hh:02d}:{mm:02d} every day.")
+                if set_alarm(hh, mm, list(range(7))):
+                    st.success(f"Alarm set for {hh:02d}:{mm:02d} every day.")
             else:
-                st.warning("Couldn't parse that time.")
+                st.warning("Couldn't read that time.")
         else:
-            st.info("Free-form requests are the Gemma milestone - for now use "
-                    "'update', alarm phrases, or the Preferences panel above.")
+            # ---- layer 2: language understanding ---------------------------
+            kind = brain.classify(CFG, txt)
+            if kind == "preferences":
+                add, rem, reply = brain.parse_preferences(CFG, txt)
+                if add or rem:
+                    CFG = brain.apply_preferences(CFG, add, rem)
+                    save_cfg(CFG)
+                    publish_once("gateway/control", {"type": "refresh"})
+                    st.success(reply)
+                    st.caption(f"added: {add or '-'}   removed: {rem or '-'}")
+                else:
+                    st.warning("I couldn't match that to a known source. "
+                               "Add it manually in Settings, or extend catalog.py.")
+            else:
+                c = brain.answer_card(CFG, txt)
+                if c:
+                    publish_once("gateway/control",
+                                 {"type": "temp_card", "card": c, "minutes": 10})
+                    st.success(f"Sent to the device: {c['line1']} / {c['line2']}")
+                else:
+                    st.info("Free-form answers need Gemma running "
+                            "(Settings tab shows its status).")
+
+# ============================================================== ANALYTICS ===
+with tab_analytics:
+    df = read_events()
+    if df.empty:
+        st.info("No events logged yet. Events appear once the device (or the "
+                "virtual device in tools/) starts talking to the broker.")
+    else:
+        ev = df[df["topic"] == "station/event"].copy()
+        tl = df[df["topic"] == "station/telemetry"].copy()
+
+        a, b, c = st.columns(3)
+        a.metric("Events logged", len(ev))
+        knocks = int((ev.get("type") == "knock").sum()) if "type" in ev else 0
+        b.metric("Knocks", knocks)
+        if "action" in ev:
+            c.metric("Snoozes", int((ev["action"] == "snoozed").sum()))
+
+        if "type" in ev and not ev.empty:
+            st.subheader("Events per day")
+            per_day = (ev.assign(day=ev["ts"].dt.date)
+                         .groupby(["day", "type"]).size().unstack(fill_value=0))
+            st.bar_chart(per_day)
+
+            st.subheader("When you interact (by hour)")
+            per_hour = (ev.assign(hour=ev["ts"].dt.hour)
+                          .groupby("hour").size().reindex(range(24), fill_value=0))
+            st.bar_chart(per_hour)
+
+        if not tl.empty and "tempF" in tl:
+            st.subheader("Indoor climate")
+            clim = tl.set_index("ts")[[c for c in ("tempF", "rh") if c in tl]]
+            st.line_chart(clim)
+
+    url = SEC.get("azure_function_url", "")
+    if url:
+        st.divider()
+        st.subheader("Cloud aggregates (Azure Function)")
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            cloud_df = pd.DataFrame(r.json())
+            st.dataframe(cloud_df, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Couldn't reach the Function: {e}")
+
+# =============================================================== SETTINGS ===
+with tab_settings:
+    st.subheader("Topics on the device")
+    current = {t.get("key") or t.get("name", "").lower() for t in CFG.get("topics", [])}
+    picked = st.multiselect("Sources from the catalog", catalog.key_list(),
+                            default=sorted(k for k in current if k in catalog.CATALOG))
+    if st.button("Save topics"):
+        CFG["topics"] = [catalog.topic_from_key(k) for k in picked][:8]
+        save_cfg(CFG)
+        publish_once("gateway/control", {"type": "refresh"})
+        st.success("Topics saved.")
+
+    st.subheader("Location")
+    loc = CFG.get("location", {})
+    lat = st.number_input("Latitude", value=float(loc.get("lat", 33.6405)), format="%.4f")
+    lon = st.number_input("Longitude", value=float(loc.get("lon", -117.8443)), format="%.4f")
+    mins = st.slider("Refresh every (minutes)", 2, 60, int(CFG.get("refresh_minutes", 15)))
+    if st.button("Save location & refresh rate"):
+        CFG["location"] = {"lat": lat, "lon": lon, "label": loc.get("label", "")}
+        CFG["refresh_minutes"] = mins
+        save_cfg(CFG)
+        st.success("Saved.")
+
+    st.subheader("Gemma (local AI)")
+    g = CFG.get("gemma", {})
+    on = st.toggle("Enable Gemma", value=bool(g.get("enabled", False)))
+    model = st.text_input("Ollama model tag", value=g.get("model", "gemma4"))
+    condense = st.checkbox("Let Gemma write the card lines",
+                           value=bool(g.get("condense_cards", True)))
+    if st.button("Save Gemma settings"):
+        CFG["gemma"] = dict(g, enabled=on, model=model, condense_cards=condense)
+        save_cfg(CFG)
+        publish_once("gateway/control", {"type": "refresh"})
+        st.success("Saved.")
+
+    ok, info = brain.available(CFG)
+    if ok:
+        st.success("Ollama is reachable.")
+        st.caption("Installed models: " + (", ".join(info) if info else "none pulled yet"))
+    else:
+        st.warning(f"Ollama not reachable ({info}). The deterministic path still works.")

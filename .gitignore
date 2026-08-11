@@ -8,3 +8,5 @@ firmware/.pio/
 .venv/
 __pycache__/
 *.pyc
+azure/local.settings.json
+mosquitto/passwd
