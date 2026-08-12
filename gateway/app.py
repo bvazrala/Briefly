@@ -22,6 +22,7 @@ import streamlit as st
 
 import brain
 import catalog
+import tools
 
 BASE = pathlib.Path(__file__).resolve().parent
 
@@ -124,7 +125,7 @@ with tab_brief:
         r"(?:alarm|wake me(?: up)?)(?:\s*(?:at|for))?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
         re.IGNORECASE)
 
-    chat = st.chat_input("Try: update  ·  alarm 7:00  ·  I care about the Lakers and Bitcoin")
+    chat = st.chat_input("Try: update  ·  alarm 7:00  ·  I care about the Steelers and SpaceX stock")
     if chat:
         txt = chat.strip()
         low = txt.lower()
@@ -161,8 +162,10 @@ with tab_brief:
                     st.success(reply)
                     st.caption(f"added: {add or '-'}   removed: {rem or '-'}")
                 else:
-                    st.warning("I couldn't match that to a known source. "
-                               "Add it manually in Settings, or extend catalog.py.")
+                    st.warning("I couldn't tell what to add or remove.")
+                    st.caption("Try naming it plainly, e.g. \"I care about the "
+                               "Steelers and SpaceX stock\", or edit the list "
+                               "directly in the Settings tab.")
             else:
                 c = brain.answer_card(CFG, txt)
                 if c:
@@ -170,8 +173,8 @@ with tab_brief:
                                  {"type": "temp_card", "card": c, "minutes": 10})
                     st.success(f"Sent to the device: {c['line1']} / {c['line2']}")
                 else:
-                    st.info("Free-form answers need Gemma running "
-                            "(Settings tab shows its status).")
+                    st.info("Answering questions needs Ollama running "
+                            "(the Settings tab shows its status).")
 
 # ============================================================== ANALYTICS ===
 with tab_analytics:
@@ -220,15 +223,17 @@ with tab_analytics:
 
 # =============================================================== SETTINGS ===
 with tab_settings:
-    st.subheader("Topics on the device")
-    current = {t.get("key") or t.get("name", "").lower() for t in CFG.get("topics", [])}
-    picked = st.multiselect("Sources from the catalog", catalog.key_list(),
-                            default=sorted(k for k in current if k in catalog.CATALOG))
-    if st.button("Save topics"):
-        CFG["topics"] = [catalog.topic_from_key(k) for k in picked][:8]
+    st.subheader("Interests")
+    st.caption("Plain English, one per line. Anything with a live source works — "
+               "a team, a ticker, a city, a topic. Gemma picks the tool.")
+    txt = st.text_area("What the device shows",
+                       value="\n".join(CFG.get("interests", [])), height=170)
+    if st.button("Save interests"):
+        CFG["interests"] = [ln.strip() for ln in txt.splitlines() if ln.strip()][:8]
         save_cfg(CFG)
         publish_once("gateway/control", {"type": "refresh"})
-        st.success("Topics saved.")
+        st.success(f"Saved {len(CFG['interests'])} interests.")
+    st.caption("Fast path (no model call needed): " + ", ".join(catalog.keys()))
 
     st.subheader("Location")
     loc = CFG.get("location", {})
@@ -245,17 +250,19 @@ with tab_settings:
     g = CFG.get("gemma", {})
     on = st.toggle("Enable Gemma", value=bool(g.get("enabled", False)))
     model = st.text_input("Ollama model tag", value=g.get("model", "gemma4"))
-    condense = st.checkbox("Let Gemma write the card lines",
-                           value=bool(g.get("condense_cards", True)))
     if st.button("Save Gemma settings"):
-        CFG["gemma"] = dict(g, enabled=on, model=model, condense_cards=condense)
+        CFG["gemma"] = dict(g, enabled=on, model=model)
         save_cfg(CFG)
         publish_once("gateway/control", {"type": "refresh"})
         st.success("Saved.")
+
+    st.caption("Tools Gemma can call: " + ", ".join(tools.names()))
 
     ok, info = brain.available(CFG)
     if ok:
         st.success("Ollama is reachable.")
         st.caption("Installed models: " + (", ".join(info) if info else "none pulled yet"))
     else:
-        st.warning(f"Ollama not reachable ({info}). The deterministic path still works.")
+        st.warning(f"Ollama not reachable ({info}).")
+        st.caption("Weather, calendar, alarms and fast-path interests still work. "
+                   "Dynamic interests and questions need Ollama running.")

@@ -1,122 +1,205 @@
 # Briefly
 
-A private, minimalist briefing station and alarm clock. CS 147 final project.
+A private briefing station for your desk or nightstand. It shows the weather, your next calendar event, and any topic you name in plain English. Tell it you care about the Steelers and SpaceX stock and it works out where to look, in real time.
 
-Tell it what you care about in plain English; type `update` to refresh. It
-shows glanceable cards (weather, next event, headlines, your topics), rings
-alarms that live on the chip, and snoozes when you knock the case. All AI runs
-locally on your own laptop — no request ever leaves the network.
+It is also a reliable alarm clock. Knock twice on the case to snooze. The clock and alarm keep working when the laptop is closed.
+
+<!-- TODO: add a photo or short GIF of the device here. A real photo is the single highest value addition to this README. -->
+
+## Why
+
+Checking the weather, your calendar, and the news takes ten seconds. Doing it on a phone takes ten minutes, because every unlock invites notifications and feeds. Smart displays solve this but introduce an always listening microphone and send every request to a vendor's cloud.
+
+Briefly is the middle path. Glanceable information on dedicated hardware, personalized in plain English, with the language model running locally through Ollama. There is no microphone, no vendor account, and no cloud inference: the model reasoning about your day runs on hardware you own. When a topic needs current information the gateway makes an anonymous public API call, and nothing else leaves the network.
+
+## Architecture
+
+Three tiers. An ESP32 renders and reacts, a Python gateway thinks, and Azure stores and aggregates.
+
+```mermaid
+flowchart TB
+    subgraph device["ESP32 — C++ / FreeRTOS"]
+        screens["TTGO LCD + OLED ticker"]
+        imu["IMU double-tap → knock"]
+        nvs[("Alarms in NVS flash")]
+    end
+
+    subgraph gateway["Python gateway — laptop"]
+        router{"Router<br/>deterministic first"}
+        fast["Fast path<br/>weather · calendar · clock · alarms"]
+        gemma["Gemma 4 via Ollama"]
+        registry["Tool registry<br/>gateway builds every URL"]
+        cards["Retained card JSON"]
+        dash["Streamlit dashboard"]
+    end
+
+    subgraph sources["Live sources"]
+        search["Web search"]
+        quotes["Stock + crypto quotes"]
+        meteo["Open-Meteo"]
+        ics["Calendar ICS"]
+    end
+
+    subgraph azure["Azure"]
+        hub["IoT Hub"]
+        fn["Function — daily rollup"]
+        tbl[("Table storage")]
+    end
+
+    dash --> router
+    device -- "events + telemetry over MQTT" --> router
+    router -- "known request" --> fast
+    router -- "anything else" --> gemma
+    gemma -- "tool call JSON" --> registry
+    registry --> search & quotes & meteo & ics
+    registry -- "results" --> gemma
+    gemma -- "two-line card" --> cards
+    fast --> cards
+    cards -- "retained MQTT" --> device
+    router -- "HTTPS" --> hub --> fn --> tbl
+    tbl -- "aggregates" --> dash
+```
+
+The device and gateway talk over MQTT through a local Mosquitto broker with username and password authentication. The gateway publishes retained card messages, so the device recovers its display automatically after either side restarts.
+
+## How a card is built
+
+1. A request arrives: a scheduled refresh, a knock on the case, or a line of chat.
+2. The router checks the deterministic fast path first. Weather, calendar, clock, alarms, and a short table of common topics are handled entirely in code, with no model call.
+3. Anything else goes to Gemma, which fetches nothing itself. It emits a structured tool call, a tool name and arguments, and the gateway validates both against a schema before executing.
+4. Results return to Gemma, which condenses them into two lines of at most 21 characters and returns JSON constrained output.
+5. The gateway publishes the card as a retained MQTT message. The device renders it across the color LCD and the OLED ticker. Cards refresh every 15 minutes or on demand.
+
+## Design decisions
+
+**The model chooses tools, never URLs.** Asked to add a topic, a language model will confidently produce a plausible feed URL that returns 404. An earlier version solved that by constraining the model to a fixed list of sources, which capped the product at whatever had been typed into that file. Tool calling keeps the safety property without the cap: Gemma emits a tool name and arguments, the gateway validates both and builds the request itself. New capability means adding a tool, not widening a whitelist.
+
+**The language model is never in the path of a critical command.** Model output varies for identical input, so the commands people use most are handled deterministically in code. The word `update` is a hard coded trigger. Alarm phrases are matched by pattern first. Only free form text reaches the model. The feature that feels most intelligent needed the least model involvement.
+
+**Every model path has a deterministic fallback.** Each call is bounded by a timeout, and each result is parsed defensively. If Gemma is slow, absent, or returns something unparseable, the gateway formats the raw tool result itself and still publishes a card. The system degrades in quality rather than failing.
+
+**The device degrades instead of breaking.** Alarms persist in on chip NVS flash and time comes from NTP, so the clock and alarm subsystem never depend on the gateway. Close the laptop and Briefly is still an alarm clock. Open it and retained MQTT messages restore the cards without user action.
+
+**Firmware is organized as FreeRTOS tasks.** Networking, display, input, and timekeeping run as separate tasks so a slow network call cannot stall the display or delay an alarm.
+
+**Transport, model, tools, and sources are separate modules.** Each can be exercised independently, which makes the whole gateway testable with no hardware attached. A virtual device in `tools/` speaks the same MQTT protocol as the firmware, so both halves of the team can work in parallel.
+
+## Repository layout
 
 ```
-firmware/   ESP32 firmware (C++/PlatformIO)     - complete, unchanged since v1
-gateway/    service.py + app.py + Gemma layer   - complete
-mosquitto/  broker config
-tools/      virtual_device.py, publish_test_card.py
-azure/      Function App for cloud analytics
+firmware/          C++ / Arduino / PlatformIO. FreeRTOS tasks, display, alarm, NVS persistence.
+gateway/
+  service.py       Always on: refresh loop, MQTT wiring, Azure forwarding.
+  app.py           Streamlit dashboard: cards, chat router, analytics, settings.
+  brain.py         Tool-calling loop, card writing, preference parsing.
+  tools.py         Tool registry, argument schemas, validation, TTL cache.
+  fetchers.py      Web search, quotes, weather, geocoding, calendar, RSS.
+  catalog.py       Fast-path table for common topics.
+  mqtt_link.py     Publish and subscribe, retained card handling.
+  cloud.py         Azure IoT Hub forwarding.
+tools/
+  virtual_device.py   Full device simulator. No hardware required.
+  publish_test_card.py
+azure/             Azure Function for daily aggregates.
+mosquitto/         Broker config.
 ```
 
-## Quick start
+## Running the gateway
+
+Requirements: Python 3.11 or newer, a local Mosquitto broker, and [Ollama](https://ollama.com) with a Gemma model pulled.
 
 ```bash
-# 1. broker (terminal 1)
+git clone https://github.com/bvazrala/<REPO_NAME>.git
+cd <REPO_NAME>
+
 cd mosquitto
-mosquitto_passwd -c passwd stationuser        # set the MQTT password
+mosquitto_passwd -c passwd stationuser
+chmod 644 passwd
 mosquitto -c mosquitto.conf -v
+```
 
-# 2. gateway (terminal 2)
+In a second terminal:
+
+```bash
 cd gateway
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp secrets.example.json secrets.json                  # then edit it
+cp secrets.example.json secrets.json    # then fill in the broker password
 python service.py
+```
 
-# 3. dashboard (terminal 3)
+In a third:
+
+```bash
 cd gateway && source .venv/bin/activate
 streamlit run app.py
+```
 
-# 4. a device (terminal 4) - real board, or this if you don't have one:
+The dashboard starts at `http://localhost:8501`. Set interests in plain English, for example `I care about the Steelers and SpaceX stock`. Type `update` to refresh every card.
+
+For the local model:
+
+```bash
+ollama pull <MODEL_TAG>      # confirm the exact tag with: ollama list
+```
+
+Then enable Gemma in the dashboard's Settings tab. Weather, calendar, alarms, and fast-path topics all work without it.
+
+## Running without hardware
+
+`tools/virtual_device.py` speaks the same MQTT protocol as the firmware and draws both screens as ASCII.
+
+```bash
+source gateway/.venv/bin/activate
 python tools/virtual_device.py
 ```
 
-## Working without the hardware
+Commands: `knock`, `update`, `next`, `dismiss`, `ring`, `temp`, `quit`.
 
-`tools/virtual_device.py` speaks the exact MQTT protocol the firmware speaks —
-same topics, same payloads — and draws both screens as ASCII. Commands:
-`knock`, `update`, `next`, `dismiss`, `ring`, `temp`, `quit`. Everything in the
-gateway (cards, chat, alarms, analytics) can be built and demoed with it, so
-whoever isn't holding the board is never blocked.
+## Firmware
 
-## The chat, layered on purpose
+Built with PlatformIO against the Arduino framework. Copy `include/secrets_example.h` to `include/secrets.h` and fill in Wi-Fi and broker credentials first.
 
-| You type | What happens | Model involved? |
-|---|---|---|
-| `update` | refresh every card now | **no** — exact string match |
-| `alarm 7:00`, `wake me at 7am` | sets the on-chip alarm | **no** — regex |
-| `clear alarms` | clears alarms | **no** |
-| "I care about the Lakers and Bitcoin" | maps onto catalog sources, rewrites config | Gemma, with alias fallback |
-| "how tall is the Eiffel Tower?" | answer pushed as a 10-minute card | Gemma only |
+```bash
+cd firmware
+pio run -t upload
+pio device monitor
+```
 
-The commands you use daily can never be broken by a model. That's the design.
+## Hardware
 
-## Gemma (optional, off by default)
+| Component | Qty |
+| --- | --- |
+| LILYGO TTGO ESP32 with built in LCD | 1 |
+| SSD1306 OLED 128x64 | 1 |
+| CAP1188 capacitive touch breakout | 1 |
+| LSM6DSO accelerometer and gyroscope | 1 |
+| DHT20 temperature and humidity sensor | 1 |
+| Piezo buzzer | 1 |
+| LEDs with resistors | 3 |
+| Pushbuttons | 2 |
+| Breadboard, jumper wires, headers | 1 |
 
-1. Install Ollama (ollama.com), then pull a model. **Check the exact tag** with
-   `ollama list` / the model library and put it in `config.json` → `gemma.model`.
-2. Settings tab → toggle **Enable Gemma**.
+A host laptop runs the gateway and the local model.
 
-Three jobs: condensing raw feeds into 21-character card lines, mapping
-preference sentences onto catalog keys, and answering one-off questions.
-Every path has a deterministic fallback and a hard timeout — if Ollama is off,
-slow, or returns nonsense, you get the plain formatted card instead of an error.
+## Status
 
-**Why the model never writes URLs:** `catalog.py` holds the real feeds; Gemma
-may only pick *keys* from it. Hallucinated sources are impossible by
-construction. To support something new, add one line to `catalog.py`.
+<!-- TODO: update as milestones land. -->
 
-## Cloud analytics
+- [x] Hardware bring up. I2C bus scan, both displays drawing, NTP clock running.
+- [x] MQTT round trip with retained cards rendering on device.
+- [x] Standalone alarm with double knock snooze.
+- [x] Gateway end to end: live sources, retained cards, dashboard, virtual device.
+- [ ] Tool calling against a running Ollama instance.
+- [ ] Azure ingestion and the analytics dashboard.
+- [ ] Enclosure and final demo.
 
-`azure/` is a Function App: a daily timer rolls raw IoT Hub event blobs into
-per-day aggregates in Table Storage, and an HTTP endpoint serves the last 30
-days as JSON. Put that URL in `secrets.json` → `azure_function_url` and the
-dashboard's Analytics tab renders it. Full deployment steps in `azure/README.md`.
+Planned evaluation: the fraction of well formed cards Gemma produces across a week of real use, and a comparison of card quality and latency between the E4B and 12B model sizes.
 
-The Analytics tab also charts locally from `state/events.log` (events per day,
-interactions by hour, indoor climate) so you have visuals before Azure is up.
+## Contributions
 
-## MQTT topics
+This is a two person project. I am the team lead and wrote all of the software: the firmware, the gateway, the tool calling layer, the MQTT transport, and the dashboard. My teammate handles hardware assembly and on device testing.
 
-| topic | direction | payload |
-|---|---|---|
-| `station/cards` | gateway → device (retained) | `{"v":1,"cards":[{"id","title","line1","line2"}]}` |
-| `station/command` | gateway → device | `set_alarm` / `clear_alarms` / `beep` |
-| `station/event` | device → gateway | `boot` / `knock` / `key` / `alarm` actions |
-| `station/telemetry` | device → gateway | `{"tempF":71.2,"rh":48}` |
-| `gateway/control` | dashboard → service | `refresh` / `temp_card` / `clear_temp` |
+## License
 
-Watch everything: `mosquitto_sub -h localhost -u stationuser -P <pw> -t '#' -v`
-
-## Verified
-
-Card build, 21-char clamping, preference parsing (with and without Gemma),
-negation handling, model-output parsing (code fences / prose / garbage), and a
-full loop against a real Mosquitto broker: retained cards reaching a late-
-joining device, device→gateway events, gateway→device commands, payload size
-vs. the firmware's 4096-byte buffer (386 bytes typical). The **firmware itself
-is unchanged from v1** — your partner can keep flashing the same build.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `Connection refused` on any MQTT call | Mosquitto isn't running, or 2.x is still localhost-only — use `mosquitto/mosquitto.conf` |
-| Broker: "Unable to open pwfile" | it dropped privileges; make `passwd` readable (`chmod 644`) or run the broker as your own user |
-| Device connects, no cards | is `service.py` running? check `mosquitto_sub -t station/cards -v` |
-| Gemma slow or timing out | raise `gemma.timeout_s`, or use a smaller model tag |
-| Cards show odd text with Gemma on | turn off "Let Gemma write the card lines" — deterministic formatting returns |
-| Streamlit edits don't reach the device | the service hot-reloads `config.json` on each refresh; press Refresh now |
-
-## Repo hygiene
-
-`gateway/secrets.json`, `firmware/include/secrets.h`, and
-`azure/local.settings.json` are gitignored. Never commit Wi-Fi, MQTT, Azure, or
-calendar credentials.
+<!-- TODO: pick one. MIT is the usual default. -->

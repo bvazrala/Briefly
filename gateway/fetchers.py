@@ -51,6 +51,90 @@ def coin(ids="bitcoin"):
         return None
 
 
+def web_search(query, max_results=5):
+    """Keyless web search via DuckDuckGo. Returns [{title, body}] or None.
+    The package was renamed from duckduckgo_search to ddgs; accept either."""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+    except ImportError:
+        print("[fetch] web_search unavailable: pip install ddgs")
+        return None
+    try:
+        out = []
+        for r in DDGS().text(query, max_results=max_results):
+            title = (r.get("title") or "").strip()
+            body = (r.get("body") or "").strip()
+            if title or body:
+                out.append({"title": title[:160], "body": body[:400]})
+        return out or None
+    except Exception as e:
+        print(f"[fetch] web_search {query!r} failed:", e)
+        return None
+
+
+def geocode(place):
+    """Place name -> {name, lat, lon} using Open-Meteo's keyless geocoder."""
+    try:
+        url = ("https://geocoding-api.open-meteo.com/v1/search"
+               f"?name={requests.utils.quote(str(place))}&count=1&language=en&format=json")
+        r = requests.get(url, timeout=10, headers=UA)
+        r.raise_for_status()
+        results = r.json().get("results") or []
+        if not results:
+            return None
+        top = results[0]
+        label = top["name"]
+        if top.get("admin1"):
+            label += f", {top['admin1']}"
+        return {"name": label, "lat": top["latitude"], "lon": top["longitude"]}
+    except Exception as e:
+        print(f"[fetch] geocode {place!r} failed:", e)
+        return None
+
+
+def stock(ticker):
+    """Free, keyless quote. Tries Stooq CSV first, falls back to Yahoo chart JSON.
+    Returns {"price": float, "chg": percent} or None."""
+    t = (ticker or "").strip()
+    if not t:
+        return None
+
+    # --- Stooq (simple CSV, no key, no rate limit in practice) ------------
+    try:
+        url = f"https://stooq.com/q/l/?s={t.lower()}.us&f=sd2t2ohlcv&h&e=csv"
+        r = requests.get(url, timeout=10, headers=UA)
+        r.raise_for_status()
+        lines = [ln for ln in r.text.strip().splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            hdr = [h.strip().lower() for h in lines[0].split(",")]
+            row = [c.strip() for c in lines[1].split(",")]
+            d = dict(zip(hdr, row))
+            close, openp = float(d["close"]), float(d["open"])
+            if close > 0 and openp > 0:
+                return {"price": close, "chg": (close - openp) / openp * 100.0}
+    except Exception as e:
+        print(f"[fetch] stooq {t} failed:", e)
+
+    # --- Yahoo fallback ----------------------------------------------------
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{t.upper()}"
+        r = requests.get(url, timeout=10, headers=UA)
+        r.raise_for_status()
+        meta = r.json()["chart"]["result"][0]["meta"]
+        price = meta.get("regularMarketPrice")
+        prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+        if price:
+            chg = ((price - prev) / prev * 100.0) if prev else 0.0
+            return {"price": float(price), "chg": float(chg)}
+    except Exception as e:
+        print(f"[fetch] yahoo {t} failed:", e)
+
+    return None
+
+
 def calendar_next(ics_url):
     """Next event within 7 days from a (secret) ICS feed URL.
     Note: recurring events (RRULE) are not expanded in the MVP."""

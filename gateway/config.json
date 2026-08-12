@@ -1,18 +1,23 @@
 {
-  "location": { "lat": 33.6405, "lon": -117.8443, "label": "Irvine, CA" },
+  "location": {
+    "lat": 33.6405,
+    "lon": -117.8443,
+    "label": "Irvine, CA"
+  },
   "units": "fahrenheit",
   "refresh_minutes": 15,
-  "news_feeds": ["https://feeds.bbci.co.uk/news/rss.xml"],
-  "topics": [
-    { "key": "nba", "name": "NBA", "kind": "rss", "url": "https://www.espn.com/espn/rss/nba/news" },
-    { "key": "bitcoin", "name": "BTC", "kind": "coingecko", "ids": "bitcoin", "label": "BTC" }
+  "interests": [
+    "Steelers Training Camp",
+    "SpaceX stock"
   ],
   "gemma": {
-    "enabled": false,
+    "enabled": true,
     "url": "http://127.0.0.1:11434",
-    "model": "gemma4",
+    "model": "gemma4:12b",
+    "think": false,
+    "keep_alive": "30m",
     "temperature": 0.2,
-    "timeout_s": 45,
-    "condense_cards": true
+    "timeout_s": 180,
+    "pick_timeout_s": 120
   }
 }

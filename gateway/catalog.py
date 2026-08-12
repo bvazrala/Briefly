@@ -1,80 +1,54 @@
-"""Known data sources.
+"""Fast path.
 
-Why this file exists: a language model asked to "add the Lakers" will happily
-invent an RSS URL that 404s. So the model never writes URLs — it only picks
-KEYS from this catalog, and deterministic code turns a key into a real source.
-Hallucination becomes impossible by construction.
+A small table of interests that are so common it would be wasteful to spend a
+model call on them. If an interest matches here, the gateway fetches it
+directly and skips Gemma entirely — the card appears in milliseconds instead of
+seconds, and it still works with Ollama switched off.
 
-To support something new, add a line here. That's the whole extension story.
+Anything that does NOT match here goes to the tool-calling loop in brain.py.
+This table is an optimization, not a limit on what the product can show.
 """
+import re
 
-CATALOG = {
-    # --- news -------------------------------------------------------------
-    "world":   {"name": "World",    "kind": "rss", "url": "https://feeds.bbci.co.uk/news/rss.xml"},
-    "us":      {"name": "US News",  "kind": "rss", "url": "https://feeds.npr.org/1001/rss.xml"},
-    "tech":    {"name": "Tech",     "kind": "rss", "url": "https://feeds.arstechnica.com/arstechnica/index"},
-    "hn":      {"name": "HackerNews", "kind": "rss", "url": "https://hnrss.org/frontpage"},
-    "science": {"name": "Science",  "kind": "rss", "url": "https://feeds.npr.org/1007/rss.xml"},
-    "business": {"name": "Business", "kind": "rss", "url": "https://feeds.npr.org/1006/rss.xml"},
-
-    # --- sports -----------------------------------------------------------
-    "nba":     {"name": "NBA",      "kind": "rss", "url": "https://www.espn.com/espn/rss/nba/news"},
-    "nfl":     {"name": "NFL",      "kind": "rss", "url": "https://www.espn.com/espn/rss/nfl/news"},
-    "mlb":     {"name": "MLB",      "kind": "rss", "url": "https://www.espn.com/espn/rss/mlb/news"},
-    "nhl":     {"name": "NHL",      "kind": "rss", "url": "https://www.espn.com/espn/rss/nhl/news"},
-    "soccer":  {"name": "Soccer",   "kind": "rss", "url": "https://www.espn.com/espn/rss/soccer/news"},
-    "college": {"name": "NCAA FB",  "kind": "rss", "url": "https://www.espn.com/espn/rss/ncf/news"},
-
-    # --- finance ----------------------------------------------------------
-    "bitcoin":  {"name": "BTC", "kind": "coingecko", "ids": "bitcoin",  "label": "BTC"},
-    "ethereum": {"name": "ETH", "kind": "coingecko", "ids": "ethereum", "label": "ETH"},
-    "solana":   {"name": "SOL", "kind": "coingecko", "ids": "solana",   "label": "SOL"},
-    "dogecoin": {"name": "DOGE", "kind": "coingecko", "ids": "dogecoin", "label": "DOGE"},
+FAST = {
+    "world news":    {"tool": "headlines",    "args": {"category": "world"},    "label": "World"},
+    "us news":       {"tool": "headlines",    "args": {"category": "us"},       "label": "US News"},
+    "tech news":     {"tool": "headlines",    "args": {"category": "tech"},     "label": "Tech"},
+    "science news":  {"tool": "headlines",    "args": {"category": "science"},  "label": "Science"},
+    "business news": {"tool": "headlines",    "args": {"category": "business"}, "label": "Business"},
+    "space news":    {"tool": "headlines",    "args": {"category": "space"},    "label": "Space"},
+    "bitcoin":       {"tool": "crypto_price", "args": {"coin_id": "bitcoin"},   "label": "BTC"},
+    "ethereum":      {"tool": "crypto_price", "args": {"coin_id": "ethereum"},  "label": "ETH"},
+    "solana":        {"tool": "crypto_price", "args": {"coin_id": "solana"},    "label": "SOL"},
 }
 
-# Words that map onto a catalog key without any model involved. This is the
-# fallback path when Ollama is off, and it covers most real phrasings.
-ALIASES = {
-    "world": ["world", "international", "global", "bbc"],
-    "us": ["us news", "national", "npr", "america"],
-    "tech": ["tech", "technology", "ars technica", "gadgets"],
-    "hn": ["hacker news", "hackernews", "hn", "startups"],
-    "science": ["science", "space", "research"],
-    "business": ["business", "markets", "economy", "finance news"],
-    "nba": ["nba", "basketball", "lakers", "warriors", "celtics", "clippers"],
-    "nfl": ["nfl", "football", "49ers", "rams", "chargers"],
-    "mlb": ["mlb", "baseball", "dodgers", "angels", "padres"],
-    "nhl": ["nhl", "hockey", "ducks", "kings"],
-    "soccer": ["soccer", "premier league", "la liga", "champions league", "futbol"],
-    "college": ["college football", "ncaa", "cfb"],
+# phrase -> canonical key above
+_ALIASES = {
+    "world news": ["world news", "world", "international news", "global news"],
+    "us news": ["us news", "national news", "america news"],
+    "tech news": ["tech news", "tech", "technology"],
+    "science news": ["science news", "science"],
+    "business news": ["business news", "business", "markets"],
+    "space news": ["space news", "space"],
     "bitcoin": ["bitcoin", "btc"],
     "ethereum": ["ethereum", "eth"],
     "solana": ["solana", "sol"],
-    "dogecoin": ["dogecoin", "doge"],
 }
 
-
-def key_list():
-    return sorted(CATALOG.keys())
-
-
-def describe_catalog():
-    """One compact line per source, used inside the Gemma prompt."""
-    return "\n".join(f"- {k}: {v['name']} ({v['kind']})" for k, v in sorted(CATALOG.items()))
+_SORTED = sorted(
+    ((key, phrase) for key, ps in _ALIASES.items() for phrase in ps),
+    key=lambda kv: -len(kv[1]),
+)
 
 
-def match_keywords(text):
-    """Deterministic alias matching. Returns catalog keys found in the text."""
-    t = " " + text.lower() + " "
-    hits = []
-    for key, words in ALIASES.items():
-        if any(w in t for w in words):
-            hits.append(key)
-    return hits
+def lookup(interest):
+    """Return a fast-path plan for this interest, or None to use the model."""
+    t = " ".join(str(interest).lower().split())
+    for key, phrase in _SORTED:
+        if re.fullmatch(re.escape(phrase), t):
+            return dict(FAST[key], key=key)
+    return None
 
 
-def topic_from_key(key):
-    src = CATALOG.get(key)
-    if not src:
-        return None
-    return dict(src, key=key)
+def keys():
+    return sorted(FAST)
