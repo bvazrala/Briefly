@@ -41,6 +41,7 @@ SYS_PICK = (
 SYS_CARD = (
     "You write cards for a tiny two-line display. "
     f"HARD LIMIT: {FIT} characters per line, including spaces. "
+    f"Aim for {FIT - 3} or fewer so nothing gets cut. "
     "Reply with only JSON: {\"title\": \"...\", \"line1\": \"...\", \"line2\": \"...\"}. "
     "title is at most 12 characters.\n"
     "Report only what is NEW or CURRENT: the latest score, price, result, or "
@@ -70,7 +71,19 @@ SYS_CLASSIFY = (
 
 # --------------------------------------------------------------- utilities --
 def fit(s, n=FIT):
-    return " ".join(str(s or "").split())[:n]
+    """Trim to n characters without slicing a word in half.
+
+    A hard slice produces things like "Day 11 updates releas". Backing off to
+    the last space is better, as long as we don't throw away most of the line.
+    """
+    s = " ".join(str(s or "").split())
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    space = cut.rfind(" ")
+    if space >= n - 9:
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:-")
 
 
 def card(cid, title, l1, l2=""):

@@ -7,8 +7,8 @@
   "units": "fahrenheit",
   "refresh_minutes": 15,
   "interests": [
-    "Steelers Training Camp",
-    "SpaceX stock"
+    "SpaceX stock",
+    "Seahawks"
   ],
   "gemma": {
     "enabled": true,

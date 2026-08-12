@@ -224,16 +224,56 @@ with tab_analytics:
 # =============================================================== SETTINGS ===
 with tab_settings:
     st.subheader("Interests")
-    st.caption("Plain English, one per line. Anything with a live source works — "
-               "a team, a ticker, a city, a topic. Gemma picks the tool.")
-    txt = st.text_area("What the device shows",
-                       value="\n".join(CFG.get("interests", [])), height=170)
-    if st.button("Save interests"):
-        CFG["interests"] = [ln.strip() for ln in txt.splitlines() if ln.strip()][:8]
+    st.caption("Plain English. Anything with a live source works — a team, a "
+               "ticker, a city, a topic. Gemma picks the tool.")
+
+    interests = [str(i) for i in CFG.get("interests", [])]
+
+    def save_interests(items, note):
+        CFG["interests"] = items[:8]
         save_cfg(CFG)
         publish_once("gateway/control", {"type": "refresh"})
-        st.success(f"Saved {len(CFG['interests'])} interests.")
-    st.caption("Fast path (no model call needed): " + ", ".join(catalog.keys()))
+        st.toast(note)
+        st.rerun()
+
+    with st.form("add_interest", clear_on_submit=True):
+        a, b = st.columns([5, 1])
+        new_item = a.text_input(
+            "Add an interest", label_visibility="collapsed",
+            placeholder="e.g. Steelers, SpaceX stock, weather in Tokyo")
+        added = b.form_submit_button("Add", use_container_width=True)
+    if added and new_item.strip():
+        item = new_item.strip()
+        if item.lower() in {i.lower() for i in interests}:
+            st.warning(f"{item} is already on the list.")
+        elif len(interests) >= 8:
+            st.warning("Eight interests is the limit — remove one first.")
+        else:
+            save_interests(interests + [item], f"Added {item}")
+
+    if interests:
+        for idx, item in enumerate(interests):
+            row, btn = st.columns([6, 1])
+            row.markdown(f"**{item}**")
+            if btn.button("Remove", key=f"rm_{idx}", use_container_width=True):
+                save_interests([x for j, x in enumerate(interests) if j != idx],
+                               f"Removed {item}")
+        if st.button("Clear all", type="secondary"):
+            save_interests([], "Cleared all interests")
+    else:
+        st.info("No interests yet. Add one above, or use a quick pick below.")
+
+    st.caption("Quick add — these skip the model and appear instantly:")
+    quick = catalog.keys()
+    cols = st.columns(3)
+    for i, key in enumerate(quick):
+        if cols[i % 3].button(key, key=f"qa_{key}", use_container_width=True):
+            if key in {x.lower() for x in interests}:
+                st.warning(f"{key} is already on the list.")
+            elif len(interests) >= 8:
+                st.warning("Eight interests is the limit — remove one first.")
+            else:
+                save_interests(interests + [key], f"Added {key}")
 
     st.subheader("Location")
     loc = CFG.get("location", {})
