@@ -6,6 +6,7 @@ gateway/state/
 firmware/.pio/
 .pio/
 .venv/
+azure/.venv/
 __pycache__/
 *.pyc
 azure/local.settings.json

@@ -32,6 +32,11 @@ CONTAINER = os.environ.get("EVENTS_CONTAINER", "iot-events")
 TABLE = os.environ.get("AGGREGATE_TABLE", "dailyaggregates")
 PARTITION = "station"
 
+# Telemetry is a once-a-minute heartbeat (~1440 records/day). Counting it in
+# "events" would swamp the user-facing events and flatten the dashboard chart,
+# so it is excluded from the event count but still feeds the temp/rh averages.
+TELEMETRY_TOPIC = "station/telemetry"
+
 
 def _records_from_blob(text):
     """IoT Hub routing writes newline-delimited JSON records. With the endpoint
@@ -72,7 +77,8 @@ def _aggregate(records):
         if not day:
             continue
         d = days[day]
-        d["events"] += 1
+        if b.get("topic") != TELEMETRY_TOPIC:
+            d["events"] += 1
         t = b.get("type")
         if t == "knock":
             d["knocks"] += 1
