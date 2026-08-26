@@ -219,7 +219,7 @@ python tools/virtual_device.py
   "mqtt_port": 1883,
   "mqtt_user": "stationuser",
   "mqtt_pass": "",
-  "calendar_ics_url": "",
+  "calendar_ics_url": "",  // Optional Calender Integration
   "azure_connection_string": "HostName=<hub>.azure-devices.net;DeviceId=<device>;SharedAccessKey=<key>",
   "azure_function_url": "https://<app>.azurewebsites.net/api/aggregates?code=<function-key>"
 }
