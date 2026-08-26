@@ -232,8 +232,6 @@ belongs in the repo.
 
 ---
 
-## Cloud pipeline
-
 ### Resources
 
 | Resource | Name |
