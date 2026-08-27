@@ -9,7 +9,7 @@ dashboard.
 
 ## Demo
 
-[![Briefly demo](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)]([https://youtu.be/VIDEO_ID](https://youtu.be/FEe-nwqJ1Is))
+[![Briefly demo](https://img.youtube.com/vi/FEe-nwqJ1Is/maxresdefault.jpg)]([https://youtu.be/VIDEO_ID](https://youtu.be/FEe-nwqJ1Is))
 
 ---
 
