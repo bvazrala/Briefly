@@ -7,6 +7,12 @@ dashboard.
 
 ---
 
+## Demo
+
+[![Briefly demo](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)]([https://youtu.be/VIDEO_ID](https://youtu.be/FEe-nwqJ1Is))
+
+---
+
 ## What it does
 
 A LILYGO TTGO ESP32 on the desk reads temperature and humidity, detects knocks and
